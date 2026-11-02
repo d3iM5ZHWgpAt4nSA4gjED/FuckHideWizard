@@ -391,3 +391,88 @@ python patch_url.py --host http://127.0.0.1:8080
 | `0x14002DE28` | 未注册统计（`hideall_unreg36.asp`） |
 | `0x14003547C` | 主窗口初始化，调用 `MapFileAndCheckSumW` |
 | `0x140030A9C` | PE 校验和比较 |
+
+## 10. 免费协议（2345 推广）激活路径
+
+这一路径与注册码路径完全独立：不校验序列号、不联网激活，勾选即生效。
+
+### 10.1 入口与状态
+
+| 项目 | 内容 |
+|---|---|
+| 勾选框 | 对话框 142 控件 1158「使用免费协议」，`this+2488`（DWORD） |
+| 确定按钮 | 控件 1053 → `sub_14003AE0C`：`UpdateData(TRUE)`，把勾选状态写入 |
+| 状态保存 | `HKCU\Software\U_HIDE\All\YESFREE`（DWORD） |
+| 内存标志 | `dword_1400C5478`（启动时由 `sub_14003357C` 从 YESFREE 读入） |
+| 后续消息 | 勾选后再 `PostMessage(0x469, 0x50, 91)`（与「关闭激活窗口」同一处理） |
+
+即：勾选「使用免费协议」并点确定 → 写入 `YESFREE=1` → 立即执行一次浏览器/快捷方式处理
+（`sub_14003AB74`）。两种授权方式对比：
+
+| | 注册码 | 免费协议 |
+|---|---|---|
+| 是否联网 | 激活时 FLAG=1，启动后 FLAG=10 | 仅发统计/广告请求 |
+| 本地依据 | HideSN + HW_CODE | YESFREE |
+| 是否改动浏览器 | 否 | 是（见下） |
+| 是否弹窗推广 | 否 | 是（手动启动时） |
+
+### 10.2 判断时机
+
+- 未注册（`dword_1400C5460 == 0`）时主窗口初始化 `sub_14003547C` 调用 `sub_14002B898`：
+  - `dword_1400C5478 != 0`（已同意免费协议）→ 立即调用 `sub_14002B488`；
+  - 否则设置 4 号定时器：首次运行或 `-setup` 参数时 900000ms，其余 18000ms 后再弹确认框。
+- 注册码激活成功后不会再走这条路径（`dword_1400C5460 != 0`）。
+
+### 10.3 浏览器与快捷方式处理
+
+`sub_14002B488` 流程：
+
+1. 读取 `All\ADNAME` / `ADURL`，并**删除**这两个值；
+2. `sub_14003AB74`：
+   - `sub_14003A470(16)`：桌面 `*.lnk`；`sub_14003A470(25)`：公共桌面 `*.lnk`；
+     逐个交给 `sub_140039BB4` 改写；
+   - 若任务栏不存在 `MailBarClass`（邮件工具栏）：
+     - 找不到 2345 浏览器时，在用户桌面创建指向 `http://www.2345.com/tg18085-1.htm`
+       的 `Internet Exphome.lnk`，并从资源 `IEICON` 反向写出 `wuyouie.ico` 作为图标；
+     - 找到 2345 浏览器时，改为处理 2345 浏览器快捷方式
+       （`sub_140037E3C`：把 `yd.dll` 复制为 `%LOCALAPPDATA%\yidian.exe` 并设为主页）。
+3. 运行次数 `dword_1400C49F8`（`All\LUT`）：`-auto` 启动、第 8 次、每 58 次
+   或 `LUT > 1` 时执行 `sub_14003AD7C`：
+   - 扫描桌面 / 公共桌面 / 开始菜单（以及 Win7 任务栏固定项）所有 `.lnk`；
+   - 对快捷方式目标（经 COM `IShellLink` 解析）分类处理：
+     - 目标属于浏览器列表且文件名含 `2345Explorer.exe`，Win7 时固定到任务栏；
+     - 快捷方式指向 `tg18085` 推广页且未被排除时：向
+       `http://www.seapsoft.com/mailbar4.asp?REQ=8` 验证后改为指向推广页；
+     - 目标不存在：删除残留快捷方式；`(.lnk).lnk` 类：迁移到桌面；
+   - 写入 `Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\NoInternetIcon = 1`
+     隐藏桌面 IE 图标；
+   - `ADNAME`/`ADURL` 均非空时，在桌面生成对应网址的 `.url` 快捷方式；
+   - 若 2345 浏览器不存在，`ShellExecute` 运行程序目录下的 `2345down.exe`（最大化）。
+4. `LUT > 3` 且未设置 `Autohide`/`AppHot` 时弹窗，选择「是」会写
+   `All\AUTORUN = 1` 并调用 `sub_140039904` 写
+   `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 启动项
+   `"<目录>\hidewizard.exe" -auto`。
+
+`sub_140039BB4` 对被处理的 `.lnk` 调用 `IShellLink::GetPath / GetArguments / SetPath /
+SetArguments`，并 `SetFileAttributes(0x80)` 隐藏 / `DeleteFile` / `CopyFile` 重写文件；
+该函数只看文件名、不看目标，**任何与推广目录或推广页重名的普通快捷方式也会被改写或删除**。
+
+### 10.4 手动启动时的推广弹窗
+
+`sub_14002B488` 在 `LUT > 3` 且 `sub_140039078()` 返回 0（`Run` 键里不存在
+`hidewizard.exe`）时弹窗「是否将无忧隐藏设置为开机自动启动？」；返回非 0 时只提示
+「非自动启动」。选择「是」写入 `AUTORUN=1` 并添加启动项。
+
+### 10.5 额外的权限伪装
+
+`sub_14003547C` 在 Windows 6.x（Vista 及以上）启动时，若当前用户属于
+Administrators 组（`S-1-5-32-544`）、UAC 开启（`EnableLUA`）且
+`GetUserName() == "administrator"`，则令 `dword_1400C5878 = 1`，使 `sub_140039904`
+改为写入/删除 `HKCU\...\Run` 而不询问。这属于权限相关行为，与激活无关。
+
+### 10.6 隐私与安全提示
+
+- 勾选免费协议后，程序会对桌面/开始菜单中的快捷方式进行批量读写、删除、重命名；
+- 会安装或拉起 2345 浏览器、创建推广主页快捷方式、隐藏桌面 IE 图标、下发 `2345down.exe`；
+- 会写入开机启动项，并在后续启动时继续联网获取统计与广告数据
+  （`hideall_unreg36.asp`，包含 `ADNAME`/`ADURL`/`ExtBrowse`/`MAINPAGE`）。
